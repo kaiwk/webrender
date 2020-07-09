@@ -2,16 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-extern crate euclid;
-extern crate gleam;
-extern crate glutin;
-extern crate webrender;
-extern crate winit;
-
 use gleam::gl;
-use glutin::NotCurrent;
 use std::fs::File;
 use std::io::Read;
+use std::rc::Rc;
 use webrender::api::*;
 use webrender::api::units::*;
 use webrender::DebugFlags;
@@ -50,14 +44,24 @@ impl RenderNotifier for Notifier {
 
 struct Window {
     events_loop: winit::EventsLoop, //TODO: share events loop?
-    context: Option<glutin::WindowedContext<NotCurrent>>,
-    renderer: webrender::Renderer,
+    window: winit::Window,
+    context: surfman::Context,
+    device: surfman::Device,
+    gl: Rc<dyn gl::Gl>,
+    renderer: Option<webrender::Renderer>,
     name: &'static str,
     pipeline_id: PipelineId,
     document_id: DocumentId,
     epoch: Epoch,
     api: RenderApi,
     font_instance_key: FontInstanceKey,
+}
+
+impl Drop for Window {
+    fn drop(&mut self) {
+        self.device.destroy_context(&mut self.context).unwrap();
+        self.renderer.take().unwrap().deinit();
+    }
 }
 
 impl Window {
@@ -67,27 +71,50 @@ impl Window {
             .with_title(name)
             .with_multitouch()
             .with_dimensions(LogicalSize::new(800., 600.));
-        let context = glutin::ContextBuilder::new()
-            .with_gl(glutin::GlRequest::GlThenGles {
-                opengl_version: (3, 2),
-                opengles_version: (3, 0),
-            })
-            .build_windowed(window_builder, &events_loop)
-            .unwrap();
+        let window = window_builder.build(&events_loop).unwrap();
 
-        let context = unsafe { context.make_current().unwrap() };
-
-        let gl = match context.get_api() {
-            glutin::Api::OpenGl => unsafe {
-                gl::GlFns::load_with(|symbol| context.get_proc_address(symbol) as *const _)
-            },
-            glutin::Api::OpenGlEs => unsafe {
-                gl::GlesFns::load_with(|symbol| context.get_proc_address(symbol) as *const _)
-            },
-            glutin::Api::WebGl => unimplemented!(),
+        let connection = surfman::Connection::from_winit_window(&window).unwrap();
+        let widget = connection.create_native_widget_from_winit_window(&window).unwrap();
+        let adapter = connection.create_adapter().unwrap();
+        let mut device = connection.create_device(&adapter).unwrap();
+        let (major, minor) = match device.gl_api() {
+            surfman::GLApi::GL => (3, 2),
+            surfman::GLApi::GLES => (3, 0),
         };
+        let context_descriptor = device.create_context_descriptor(&surfman::ContextAttributes {
+            version: surfman::GLVersion {
+                major,
+                minor,
+            },
+            flags: surfman::ContextAttributeFlags::ALPHA |
+            surfman::ContextAttributeFlags::DEPTH |
+            surfman::ContextAttributeFlags::STENCIL,
+        }).unwrap();
+        let mut context = device.create_context(&context_descriptor, None).unwrap();
+        device.make_context_current(&context).unwrap();
 
-        let device_pixel_ratio = context.window().get_hidpi_factor() as f32;
+        let gl = match device.gl_api() {
+            surfman::GLApi::GL => unsafe {
+                gl::GlFns::load_with(
+                    |symbol| device.get_proc_address(&context, symbol) as *const _
+                )
+            },
+            surfman::GLApi::GLES => unsafe {
+                gl::GlesFns::load_with(
+                    |symbol| device.get_proc_address(&context, symbol) as *const _
+                )
+            },
+        };
+        let gl = gl::ErrorCheckingGl::wrap(gl);
+
+        let surface = device.create_surface(
+            &context,
+            surfman::SurfaceAccess::GPUOnly,
+            surfman::SurfaceType::Widget { native_widget: widget },
+        ).unwrap();
+        device.bind_surface_to_context(&mut context, surface).unwrap();
+
+        let device_pixel_ratio = window.get_hidpi_factor() as f32;
 
         let opts = webrender::RendererOptions {
             device_pixel_ratio,
@@ -96,8 +123,7 @@ impl Window {
         };
 
         let device_size = {
-            let size = context
-                .window()
+            let size = window
                 .get_inner_size()
                 .unwrap()
                 .to_physical(device_pixel_ratio as f64);
@@ -123,21 +149,24 @@ impl Window {
 
         Window {
             events_loop,
-            context: Some(unsafe { context.make_not_current().unwrap() }),
-            renderer,
+            window,
+            device,
+            context,
+            renderer: Some(renderer),
             name,
             epoch,
             pipeline_id,
             document_id,
             api,
             font_instance_key,
+            gl,
         }
     }
 
     fn tick(&mut self) -> bool {
         let mut do_exit = false;
         let my_name = &self.name;
-        let renderer = &mut self.renderer;
+        let renderer = self.renderer.as_mut().unwrap();
         let api = &mut self.api;
 
         self.events_loop.poll_events(|global_event| match global_event {
@@ -171,11 +200,12 @@ impl Window {
             return true
         }
 
-        let context = unsafe { self.context.take().unwrap().make_current().unwrap() };
-        let device_pixel_ratio = context.window().get_hidpi_factor() as f32;
+        self.device.make_context_current(&self.context).unwrap();
+
+        let device_pixel_ratio = self.window.get_hidpi_factor() as f32;
         let device_size = {
-            let size = context
-                .window()
+            let size = self
+                .window
                 .get_inner_size()
                 .unwrap()
                 .to_physical(device_pixel_ratio as f64);
@@ -287,17 +317,23 @@ impl Window {
         txn.generate_frame();
         api.send_transaction(self.document_id, txn);
 
+        let framebuffer_object = self
+            .device
+            .context_surface_info(&self.context)
+            .unwrap()
+            .unwrap()
+            .framebuffer_object;
+        self.gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
+        assert_eq!(self.gl.check_frame_buffer_status(gleam::gl::FRAMEBUFFER), gl::FRAMEBUFFER_COMPLETE);
+
         renderer.update();
         renderer.render(device_size).unwrap();
-        context.swap_buffers().ok();
 
-        self.context = Some(unsafe { context.make_not_current().unwrap() });
+        let mut surface = self.device.unbind_surface_from_context(&mut self.context).unwrap().unwrap();
+        self.device.present_surface(&self.context, &mut surface).unwrap();
+        self.device.bind_surface_to_context(&mut self.context, surface).unwrap();
 
         false
-    }
-
-    fn deinit(self) {
-        self.renderer.deinit();
     }
 }
 
@@ -313,9 +349,6 @@ fn main() {
             break;
         }
     }
-
-    win1.deinit();
-    win2.deinit();
 }
 
 fn load_file(name: &str) -> Vec<u8> {

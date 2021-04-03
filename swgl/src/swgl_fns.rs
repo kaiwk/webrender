@@ -962,7 +962,7 @@ impl Gl for Context {
     }
 
     fn draw_buffers(&self, bufs: &[GLenum]) {
-        panic!();
+        // panic!();
         //unsafe {}
     }
 
@@ -1758,7 +1758,7 @@ impl Gl for Context {
     }
 
     fn uniform_2f(&self, location: GLint, v0: GLfloat, v1: GLfloat) {
-        panic!();
+        // panic!();
     }
 
     fn uniform_2fv(&self, location: GLint, values: &[f32]) {
@@ -1798,7 +1798,7 @@ impl Gl for Context {
     }
 
     fn uniform_4f(&self, location: GLint, x: GLfloat, y: GLfloat, z: GLfloat, w: GLfloat) {
-        panic!();
+        // panic!();
     }
 
     fn uniform_4i(&self, location: GLint, x: GLint, y: GLint, z: GLint, w: GLint) {
@@ -2350,6 +2350,25 @@ impl Gl for Context {
     fn flush_mapped_buffer_range(&self, target: GLenum, offset: GLintptr, length: GLsizeiptr) {
         unimplemented!("Not supported by SWGL");
     }
+
+    // lark vc
+    // fn debug_message_callback_khr(
+    //     &self,
+    //     callback: types::GLDEBUGPROCKHR,
+    //     user_param: *const std::os::raw::c_void,
+    // ) {
+    // }
+
+    // fn debug_message_control_khr(
+    //     &self,
+    //     source: types::GLenum,
+    //     type_: types::GLenum,
+    //     severity: types::GLenum,
+    //     count: types::GLsizei,
+    //     ids: *const types::GLuint,
+    //     enabled: types::GLboolean,
+    // ) {
+    // }
 }
 
 /// A resource that is intended for sharing between threads.
